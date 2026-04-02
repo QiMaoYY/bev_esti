@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from bev_esti.data import find_sample_by_index, find_sample_by_key, load_samples
-from bev_esti.runtime import estimate_pose_for_query, load_database_cache
+from bev_esti.runtime import estimate_pose_for_query, load_database_cache, result_to_jsonable
+from bev_esti.visualization import export_pose_visualizations
 
 
 def parse_args():
@@ -60,6 +61,17 @@ def parse_args():
         "--output-json",
         default="",
         help="Optional path to save the result JSON.",
+    )
+    parser.add_argument(
+        "--visualize-dir",
+        default="",
+        help="Optional directory to export Top-K transformation and local feature visualizations.",
+    )
+    parser.add_argument(
+        "--visualize-match-limit",
+        type=int,
+        default=80,
+        help="Maximum number of local matches drawn per candidate panel.",
     )
     return parser.parse_args()
 
@@ -128,7 +140,23 @@ def main():
             f"xy={xy_err:.3f} m, yaw={yaw_err:.3f} deg"
         )
 
-    output_text = json.dumps(result, indent=2, ensure_ascii=False)
+    if args.visualize_dir:
+        print(f"[INFO] Exporting visualizations to: {args.visualize_dir}")
+        visualization_outputs = export_pose_visualizations(
+            checkpoint_path=args.checkpoint,
+            database_samples=database_samples,
+            query_image_path=query_image_path,
+            output_dir=args.visualize_dir,
+            db_cache=db_cache,
+            device_arg=args.device,
+            topk=args.topk,
+            resolution_override_m=args.resolution_m,
+            max_matches=args.visualize_match_limit,
+        )
+        result["visualization"] = visualization_outputs
+        print(f"[INFO] Visualization summary saved to: {visualization_outputs['summary_image']}")
+
+    output_text = json.dumps(result_to_jsonable(result), indent=2, ensure_ascii=False)
     #print(output_text)
 
     if args.output_json:

@@ -232,7 +232,50 @@ cd /home/qimao/grad_ws/bev_esti
 - 查询真实值
 - 估计误差
 
-### 7.3 批量评测前 20 个查询样本
+### 7.3 导出 Top-K 变换关系与局部特征可视化
+
+如果希望进一步检查：
+
+- 输入 query BEV 与 Top-K 候选 BEV 的对齐关系
+- `FAST` 关键点分布
+- 局部特征的伪彩色可视化
+- 局部匹配与 `RANSAC` 内点情况
+
+可以在单样本推理时附加 `--visualize-dir`：
+
+```bash
+cd /home/qimao/grad_ws/bev_esti
+/usr/bin/python3 estimate_pose.py \
+  --checkpoint /home/qimao/grad_ws/BEVPlace2/runs/Apr01_12-28-47/model_best.pth.tar \
+  --database-table /home/qimao/grad_ws/data/bevplace_tables/database_samples.csv \
+  --query-table /home/qimao/grad_ws/data/bevplace_tables/query_samples.csv \
+  --data-root /home/qimao/grad_ws/data \
+  --db-cache /home/qimao/grad_ws/bev_esti/database_cache.npz \
+  --query-index 10 \
+  --topk 3 \
+  --device cpu \
+  --output-json /home/qimao/grad_ws/bev_esti/debug_outputs/query_0000_result_with_viz.json \
+  --visualize-dir /home/qimao/grad_ws/bev_esti/debug_outputs/query_0000_viz
+```
+
+默认会导出：
+
+- `topk_summary.png`：Top-K 候选总览
+- `rank_XX_<db_key>_panel.png`：单个候选的详细可视化面板
+
+其中每个候选面板包含：
+
+- query / candidate 原始 BEV
+- 变换前后叠加图
+- query / candidate 的 `FAST` 关键点
+- query / candidate 的局部特征伪彩色图
+- 局部匹配连线图，其中绿色表示 `RANSAC` 内点
+
+如果需要减少匹配连线数量，可额外设置：
+
+- `--visualize-match-limit`
+
+### 7.4 批量评测前 20 个查询样本
 
 ```bash
 cd /home/qimao/grad_ws/bev_esti

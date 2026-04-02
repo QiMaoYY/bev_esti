@@ -143,15 +143,18 @@ def sample_local_descriptors(local_feat_hwc: np.ndarray, keypoints: Sequence[cv2
     return valid_kps, np.stack(descriptors, axis=0)
 
 
-def estimate_relative_pose(
+def keypoints_to_array(keypoints: Sequence[cv2.KeyPoint]) -> np.ndarray:
+    if not keypoints:
+        return np.empty((0, 2), dtype=np.float32)
+    return np.asarray([keypoint.pt for keypoint in keypoints], dtype=np.float32)
+
+
+def extract_match_debug(
     query_gray: np.ndarray,
     db_gray: np.ndarray,
     query_local_feat: np.ndarray,
     db_local_feat: np.ndarray,
-    resolution_m: float,
-    ransac_iters: int = 1000,
-    inlier_threshold_m: float = 0.5,
-) -> Optional[Dict[str, object]]:
+) -> Dict[str, object]:
     fast = cv2.FastFeatureDetector_create()
     query_kps = fast.detect(query_gray, None)
     db_kps = fast.detect(db_gray, None)
@@ -159,20 +162,40 @@ def estimate_relative_pose(
     query_kps, query_desc = sample_local_descriptors(query_local_feat, query_kps)
     db_kps, db_desc = sample_local_descriptors(db_local_feat, db_kps)
 
-    if len(query_kps) < 2 or len(db_kps) < 2:
+    matched_query_points = np.empty((0, 2), dtype=np.float32)
+    matched_db_points = np.empty((0, 2), dtype=np.float32)
+    if len(query_kps) >= 2 and len(db_kps) >= 2:
+        matcher = cv2.BFMatcher(cv2.NORM_L2)
+        matches = matcher.knnMatch(query_desc, db_desc, k=2)
+        primary_matches = [pair[0] for pair in matches if len(pair) >= 1]
+        if len(primary_matches) >= 2:
+            matched_query_points = np.asarray([query_kps[m.queryIdx].pt for m in primary_matches], dtype=np.float32)
+            matched_db_points = np.asarray([db_kps[m.trainIdx].pt for m in primary_matches], dtype=np.float32)
+
+    return {
+        "query_keypoint_count": len(query_kps),
+        "db_keypoint_count": len(db_kps),
+        "query_keypoints_px": keypoints_to_array(query_kps),
+        "db_keypoints_px": keypoints_to_array(db_kps),
+        "matched_query_points_px": matched_query_points,
+        "matched_db_points_px": matched_db_points,
+        "match_count": int(len(matched_query_points)),
+    }
+
+
+def estimate_relative_pose_from_match_debug(
+    match_debug: Dict[str, object],
+    db_image_shape: Tuple[int, int],
+    resolution_m: float,
+    ransac_iters: int = 1000,
+    inlier_threshold_m: float = 0.5,
+) -> Optional[Dict[str, object]]:
+    query_points = np.asarray(match_debug["matched_query_points_px"], dtype=np.float32)
+    db_points = np.asarray(match_debug["matched_db_points_px"], dtype=np.float32)
+    if len(query_points) < 2 or len(db_points) < 2:
         return None
 
-    matcher = cv2.BFMatcher(cv2.NORM_L2)
-    matches = matcher.knnMatch(query_desc, db_desc, k=2)
-    primary_matches = [pair[0] for pair in matches if len(pair) >= 1]
-
-    if len(primary_matches) < 2:
-        return None
-
-    query_points = np.float32([query_kps[m.queryIdx].pt for m in primary_matches])
-    db_points = np.float32([db_kps[m.trainIdx].pt for m in primary_matches])
-
-    center = np.array([[db_gray.shape[1] // 2, db_gray.shape[0] // 2]], dtype=np.float32)
+    center = np.array([[db_image_shape[1] // 2, db_image_shape[0] // 2]], dtype=np.float32)
     query_metric = (center - query_points) * float(resolution_m)
     db_metric = (center - db_points) * float(resolution_m)
 
@@ -187,8 +210,7 @@ def estimate_relative_pose(
         return None
 
     relative_h = np.vstack((relative_mat, np.array([[0.0, 0.0, 1.0]], dtype=np.float64)))
-    yaw_rad = math.atan2(relative_h[0, 1], relative_h[0, 0])
-
+    yaw_rad = math.atan2(relative_h[1, 0], relative_h[0, 0])
     inlier_mask = np.asarray(inlier_mask).astype(bool).reshape(-1)
     return {
         "relative_matrix_2x3": relative_mat.tolist(),
@@ -197,13 +219,37 @@ def estimate_relative_pose(
         "relative_yaw_deg": math.degrees(yaw_rad),
         "relative_tx_m": float(relative_h[0, 2]),
         "relative_ty_m": float(relative_h[1, 2]),
-        "query_keypoints": len(query_kps),
-        "db_keypoints": len(db_kps),
-        "match_count": len(primary_matches),
+        "query_keypoints": int(match_debug["query_keypoint_count"]),
+        "db_keypoints": int(match_debug["db_keypoint_count"]),
+        "match_count": int(match_debug["match_count"]),
         "inlier_count": int(consensus),
-        "inlier_ratio": float(consensus / max(1, len(primary_matches))),
+        "inlier_ratio": float(consensus / max(1, len(query_points))),
         "inlier_mask": inlier_mask.tolist(),
     }
+
+
+def estimate_relative_pose(
+    query_gray: np.ndarray,
+    db_gray: np.ndarray,
+    query_local_feat: np.ndarray,
+    db_local_feat: np.ndarray,
+    resolution_m: float,
+    ransac_iters: int = 1000,
+    inlier_threshold_m: float = 0.5,
+) -> Optional[Dict[str, object]]:
+    match_debug = extract_match_debug(
+        query_gray=query_gray,
+        db_gray=db_gray,
+        query_local_feat=query_local_feat,
+        db_local_feat=db_local_feat,
+    )
+    return estimate_relative_pose_from_match_debug(
+        match_debug,
+        db_image_shape=db_gray.shape[:2],
+        resolution_m=resolution_m,
+        ransac_iters=ransac_iters,
+        inlier_threshold_m=inlier_threshold_m,
+    )
 
 
 def pose_to_matrix_2d(x: float, y: float, yaw_rad: float) -> np.ndarray:
@@ -211,8 +257,8 @@ def pose_to_matrix_2d(x: float, y: float, yaw_rad: float) -> np.ndarray:
     s = math.sin(yaw_rad)
     return np.array(
         [
-            [c, s, x],
-            [-s, c, y],
+            [c, -s, x],
+            [s, c, y],
             [0.0, 0.0, 1.0],
         ],
         dtype=np.float64,
@@ -220,7 +266,7 @@ def pose_to_matrix_2d(x: float, y: float, yaw_rad: float) -> np.ndarray:
 
 
 def matrix_to_pose_2d(matrix: np.ndarray) -> Dict[str, float]:
-    yaw_rad = math.atan2(matrix[0, 1], matrix[0, 0])
+    yaw_rad = math.atan2(matrix[1, 0], matrix[0, 0])
     return {
         "x": float(matrix[0, 2]),
         "y": float(matrix[1, 2]),
