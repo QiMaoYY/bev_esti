@@ -12,6 +12,7 @@ from tqdm import tqdm
 from .data import BEVImageDataset, Sample, bev_to_model_tensor, read_bev_grayscale
 from .model import REIN
 from .ransac import rigid_ransac
+import time
 
 
 def choose_device(device_arg: str = "cpu") -> torch.device:
@@ -41,7 +42,6 @@ def extract_global_descriptors(
     dataset = BEVImageDataset(samples)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     outputs: List[np.ndarray] = []
-
     iterator = tqdm(loader, desc="Extracting descriptors") if show_progress else loader
     with torch.no_grad():
         for images, _ in iterator:
@@ -50,6 +50,23 @@ def extract_global_descriptors(
             outputs.append(global_desc.detach().cpu().numpy())
 
     return np.concatenate(outputs, axis=0).astype(np.float32)
+
+
+def extract_features_batch(
+    model: REIN,
+    gray_images: Sequence[np.ndarray],
+    device: torch.device,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if not gray_images:
+        raise ValueError("gray_images must not be empty.")
+
+    with torch.no_grad():
+        batch = torch.stack([bev_to_model_tensor(gray_image) for gray_image in gray_images], dim=0).to(device)
+        _, local_feat, global_desc = model(batch)
+
+    local_feat = local_feat.detach().cpu().numpy().transpose(0, 2, 3, 1).astype(np.float32)
+    global_desc = global_desc.detach().cpu().numpy().astype(np.float32)
+    return local_feat, global_desc
 
 
 def save_database_cache(output_path: str, samples: Sequence[Sample], descriptors: np.ndarray) -> None:
@@ -98,13 +115,8 @@ def build_database_cache(
 
 
 def extract_query_features(model: REIN, gray_image: np.ndarray, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
-    with torch.no_grad():
-        tensor = bev_to_model_tensor(gray_image).unsqueeze(0).to(device)
-        _, local_feat, global_desc = model(tensor)
-
-    local_feat = local_feat[0].detach().cpu().numpy().transpose(1, 2, 0).astype(np.float32)
-    global_desc = global_desc[0].detach().cpu().numpy().astype(np.float32)
-    return local_feat, global_desc
+    local_feat, global_desc = extract_features_batch(model, [gray_image], device=device)
+    return local_feat[0], global_desc[0]
 
 
 def l2_topk(query_desc: np.ndarray, database_descs: np.ndarray, topk: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -257,7 +269,10 @@ def estimate_pose_for_query(
     if show_progress:
         print(f"[INFO] Query image: {query_image_path}")
     query_gray = read_bev_grayscale(query_image_path)
+    start_time = time.perf_counter()
     query_local_feat, query_global_desc = extract_query_features(model, query_gray, device=device)
+    end_time = time.perf_counter()
+    print(f"[INFO] Query feature extraction time: {end_time - start_time:.2f} seconds")
 
     top_indices, top_sq_dists = l2_topk(query_global_desc, database_descs, topk=topk)
     if show_progress:
@@ -267,60 +282,75 @@ def estimate_pose_for_query(
     best_refined: Optional[Dict[str, object]] = None
     best_refined_score: Optional[Tuple[int, float]] = None
 
-    candidate_iter = zip(top_indices.tolist(), top_sq_dists.tolist())
-    if show_progress and topk > 1:
-        candidate_iter = tqdm(
-            candidate_iter,
-            total=topk,
+    retrieved_candidates: List[Tuple[int, int, float, Sample, np.ndarray]] = []
+    for rank, (db_index, feature_sq_l2) in enumerate(zip(top_indices.tolist(), top_sq_dists.tolist()), start=1):
+        db_sample = database_samples[db_index]
+        db_gray = read_bev_grayscale(db_sample.bev_path)
+        retrieved_candidates.append((rank, db_index, float(feature_sq_l2), db_sample, db_gray))
+
+    # Local feature maps are large, so keep candidate inference batches small.
+    candidate_batch_size = max(1, min(len(retrieved_candidates), batch_size_for_db, 5))
+    progress = None
+    if show_progress and len(retrieved_candidates) > 1:
+        progress = tqdm(
+            total=len(retrieved_candidates),
             desc="Evaluating Top-K candidates",
             leave=False,
         )
 
-    for rank, (db_index, feature_sq_l2) in enumerate(candidate_iter, start=1):
-        db_sample = database_samples[db_index]
-        db_gray = read_bev_grayscale(db_sample.bev_path)
-        db_local_feat, _ = extract_query_features(model, db_gray, device=device)
+    try:
+        for batch_start in range(0, len(retrieved_candidates), candidate_batch_size):
+            batch_entries = retrieved_candidates[batch_start : batch_start + candidate_batch_size]
+            batch_grays = [entry[4] for entry in batch_entries]
+            batch_local_feats, _ = extract_features_batch(model, batch_grays, device=device)
 
-        resolution_m = resolution_override_m or db_sample.bev_resolution_m
-        pose_result = estimate_relative_pose(
-            query_gray=query_gray,
-            db_gray=db_gray,
-            query_local_feat=query_local_feat,
-            db_local_feat=db_local_feat,
-            resolution_m=resolution_m,
-        )
+            for (rank, db_index, feature_sq_l2, db_sample, db_gray), db_local_feat in zip(batch_entries, batch_local_feats):
 
-        coarse_pose = {
-            "x": db_sample.anchor_x,
-            "y": db_sample.anchor_y,
-            "yaw_rad": db_sample.anchor_yaw_rad,
-            "yaw_deg": db_sample.anchor_yaw_deg,
-        }
+                resolution_m = resolution_override_m or db_sample.bev_resolution_m
+                pose_result = estimate_relative_pose(
+                    query_gray=query_gray,
+                    db_gray=db_gray,
+                    query_local_feat=query_local_feat,
+                    db_local_feat=db_local_feat,
+                    resolution_m=resolution_m,
+                )
 
-        candidate: Dict[str, object] = {
-            "rank": rank,
-            "db_index": db_index,
-            "db_sample_key": db_sample.sample_key,
-            "db_bev_path": str(db_sample.bev_path),
-            "feature_sq_l2": float(feature_sq_l2),
-            "coarse_pose": coarse_pose,
-            "mode": "coarse_only",
-        }
+                coarse_pose = {
+                    "x": db_sample.anchor_x,
+                    "y": db_sample.anchor_y,
+                    "yaw_rad": db_sample.anchor_yaw_rad,
+                    "yaw_deg": db_sample.anchor_yaw_deg,
+                }
 
-        if pose_result is not None:
-            db_pose = pose_to_matrix_2d(db_sample.anchor_x, db_sample.anchor_y, db_sample.anchor_yaw_rad)
-            relative_h = np.asarray(pose_result["relative_matrix_3x3"], dtype=np.float64)
-            estimated_pose = matrix_to_pose_2d(db_pose @ relative_h)
-            candidate["mode"] = "refined"
-            candidate["relative_pose"] = pose_result
-            candidate["estimated_pose"] = estimated_pose
+                candidate: Dict[str, object] = {
+                    "rank": rank,
+                    "db_index": db_index,
+                    "db_sample_key": db_sample.sample_key,
+                    "db_bev_path": str(db_sample.bev_path),
+                    "feature_sq_l2": float(feature_sq_l2),
+                    "coarse_pose": coarse_pose,
+                    "mode": "coarse_only",
+                }
 
-            score = (int(pose_result["inlier_count"]), -float(feature_sq_l2))
-            if best_refined is None or score > best_refined_score:
-                best_refined = candidate
-                best_refined_score = score
+                if pose_result is not None:
+                    db_pose = pose_to_matrix_2d(db_sample.anchor_x, db_sample.anchor_y, db_sample.anchor_yaw_rad)
+                    relative_h = np.asarray(pose_result["relative_matrix_3x3"], dtype=np.float64)
+                    estimated_pose = matrix_to_pose_2d(db_pose @ relative_h)
+                    candidate["mode"] = "refined"
+                    candidate["relative_pose"] = pose_result
+                    candidate["estimated_pose"] = estimated_pose
 
-        candidates.append(candidate)
+                    score = (int(pose_result["inlier_count"]), -float(feature_sq_l2))
+                    if best_refined is None or score > best_refined_score:
+                        best_refined = candidate
+                        best_refined_score = score
+
+                candidates.append(candidate)
+                if progress is not None:
+                    progress.update(1)
+    finally:
+        if progress is not None:
+            progress.close()
 
     if best_refined is not None:
         best = best_refined
