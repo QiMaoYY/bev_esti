@@ -6,14 +6,12 @@ import numpy as np
 
 from .data import Sample, read_bev_grayscale
 from .runtime import (
-    choose_device,
+    PoseEstimator,
     estimate_relative_pose_from_match_debug,
     extract_features_batch,
-    extract_global_descriptors,
     extract_match_debug,
     extract_query_features,
     l2_topk,
-    load_model_from_checkpoint,
     matrix_to_pose_2d,
     pose_to_matrix_2d,
 )
@@ -336,55 +334,36 @@ def build_summary_canvas(
     return _stack_col(rows, gap=12)
 
 
-def export_pose_visualizations(
-    checkpoint_path: str,
-    database_samples: Sequence[Sample],
+def export_pose_visualizations_with_estimator(
+    estimator: PoseEstimator,
     query_image_path: str,
     output_dir: str,
-    db_cache: Optional[Dict[str, np.ndarray]] = None,
-    device_arg: str = "cpu",
     topk: int = 5,
-    batch_size_for_db: int = 32,
-    num_workers: int = 0,
     resolution_override_m: Optional[float] = None,
     max_matches: int = 80,
 ) -> Dict[str, str]:
     output_path = Path(output_dir).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
 
-    device = choose_device(device_arg)
-    model = load_model_from_checkpoint(checkpoint_path, device=device)
-    if db_cache is None:
-        database_descs = extract_global_descriptors(
-            model,
-            database_samples,
-            device=device,
-            batch_size=batch_size_for_db,
-            num_workers=num_workers,
-            show_progress=False,
-        )
-    else:
-        database_descs = np.asarray(db_cache["descriptors"], dtype=np.float32)
-
     query_image_path = Path(query_image_path).expanduser().resolve()
     query_gray = read_bev_grayscale(query_image_path)
-    query_local_feat, query_global_desc = extract_query_features(model, query_gray, device=device)
-    top_indices, top_sq_dists = l2_topk(query_global_desc, database_descs, topk=topk)
+    query_local_feat, query_global_desc = extract_query_features(estimator.model, query_gray, device=estimator.device)
+    top_indices, top_sq_dists = l2_topk(query_global_desc, estimator.database_descs, topk=topk)
 
     retrieved_candidates: List[Tuple[int, int, float, Sample, np.ndarray]] = []
     for rank, (db_index, feature_sq_l2) in enumerate(zip(top_indices.tolist(), top_sq_dists.tolist()), start=1):
-        db_sample = database_samples[db_index]
+        db_sample = estimator.database_samples[db_index]
         db_gray = read_bev_grayscale(db_sample.bev_path)
         retrieved_candidates.append((rank, db_index, float(feature_sq_l2), db_sample, db_gray))
 
-    candidate_batch_size = max(1, min(len(retrieved_candidates), batch_size_for_db, 5))
+    candidate_batch_size = max(1, min(len(retrieved_candidates), estimator.batch_size_for_db, 5))
     candidate_cards: List[Dict[str, object]] = []
     query_keypoints_px: Optional[np.ndarray] = None
 
     for batch_start in range(0, len(retrieved_candidates), candidate_batch_size):
         batch_entries = retrieved_candidates[batch_start : batch_start + candidate_batch_size]
         batch_grays = [entry[4] for entry in batch_entries]
-        batch_local_feats, _ = extract_features_batch(model, batch_grays, device=device)
+        batch_local_feats, _ = extract_features_batch(estimator.model, batch_grays, device=estimator.device)
 
         for (rank, db_index, feature_sq_l2, db_sample, db_gray), db_local_feat in zip(batch_entries, batch_local_feats):
             match_debug = extract_match_debug(
@@ -495,3 +474,35 @@ def export_pose_visualizations(
         "summary_image": str(output_path / summary_name),
         "query_image": str(query_image_path),
     }
+
+
+def export_pose_visualizations(
+    checkpoint_path: str,
+    database_samples: Sequence[Sample],
+    query_image_path: str,
+    output_dir: str,
+    db_cache: Optional[Dict[str, np.ndarray]] = None,
+    device_arg: str = "cpu",
+    topk: int = 5,
+    batch_size_for_db: int = 32,
+    num_workers: int = 0,
+    resolution_override_m: Optional[float] = None,
+    max_matches: int = 80,
+) -> Dict[str, str]:
+    estimator = PoseEstimator(
+        checkpoint_path=checkpoint_path,
+        database_samples=database_samples,
+        db_cache=db_cache,
+        device_arg=device_arg,
+        batch_size_for_db=batch_size_for_db,
+        num_workers=num_workers,
+        show_progress=False,
+    )
+    return export_pose_visualizations_with_estimator(
+        estimator=estimator,
+        query_image_path=query_image_path,
+        output_dir=output_dir,
+        topk=topk,
+        resolution_override_m=resolution_override_m,
+        max_matches=max_matches,
+    )

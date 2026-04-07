@@ -1,31 +1,36 @@
 #!/usr/bin/env python3
 import argparse
-from pathlib import Path
 
-from bev_esti.data import load_samples
-from bev_esti.runtime import build_database_cache
+from src.data import load_samples
+from src.project_paths import (
+    default_data_root,
+    default_database_table,
+    default_db_cache,
+    resolve_checkpoint,
+)
+from src.runtime import build_database_cache
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Build a CPU-friendly database descriptor cache for bev_esti.")
+    parser = argparse.ArgumentParser(description="Build a CPU-friendly database descriptor cache.")
     parser.add_argument(
         "--checkpoint",
-        required=True,
-        help="Path to the trained BEVPlace2 checkpoint, e.g. model_best.pth.tar.",
+        default="",
+        help="Path to the trained BEVPlace2 checkpoint. If omitted, auto-detect the latest bevplace checkpoint under ../BEVPlace2/runs.",
     )
     parser.add_argument(
         "--database-table",
-        default="/home/qimao/grad_ws/data/bevplace_tables/database_samples.csv",
+        default=default_database_table(),
         help="Path to database_samples.csv.",
     )
     parser.add_argument(
         "--data-root",
-        default="/home/qimao/grad_ws/data",
+        default=default_data_root(),
         help="Data root used to resolve bev_rel_path.",
     )
     parser.add_argument(
         "--output-cache",
-        default="/home/qimao/grad_ws/bev_esti/database_cache.npz",
+        default=default_db_cache(),
         help="Output npz path for cached global descriptors.",
     )
     parser.add_argument(
@@ -41,12 +46,14 @@ def parse_args():
 
 def main():
     args = parse_args()
+    checkpoint_path = resolve_checkpoint(args.checkpoint)
+    print(f"[INFO] Using checkpoint: {checkpoint_path}")
     print(f"[INFO] Loading database sample table: {args.database_table}")
     samples = load_samples(args.database_table, data_root=args.data_root)
     print(f"[INFO] Database sample count: {len(samples)}")
     print(f"[INFO] Output cache path: {args.output_cache}")
     cache_path = build_database_cache(
-        checkpoint_path=args.checkpoint,
+        checkpoint_path=checkpoint_path,
         samples=samples,
         cache_path=args.output_cache,
         device_arg=args.device,

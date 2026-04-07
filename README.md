@@ -37,12 +37,15 @@ bev_esti/
   setup_cpu_env.sh
   build_db_cache.py
   estimate_pose.py
-  bev_esti/
+  batch_evaluate.py
+  src/
     __init__.py
     model.py
     data.py
     ransac.py
     runtime.py
+    visualization.py
+    project_paths.py
 ```
 
 说明：
@@ -51,8 +54,11 @@ bev_esti/
 - `data.py`：读取 `database_samples.csv / query_samples.csv` 和 BEV 图像
 - `ransac.py`：移植 `BEVPlace2/RANSAC.py`
 - `runtime.py`：数据库描述子提取、Top-K 搜索、局部特征匹配、位姿恢复
+- `visualization.py`：单样本 / 批量可视化导出
+- `project_paths.py`：默认路径、自动 checkpoint 检测、自动输出目录命名
 - `build_db_cache.py`：离线缓存数据库全局描述子
 - `estimate_pose.py`：对单个 query BEV 估计位姿
+- `batch_evaluate.py`：批量评测 `coarse / refined` 并可选导出可视化
 
 ---
 
@@ -154,6 +160,18 @@ source ./.venv/bin/activate
 
 - `/home/qimao/grad_ws/data`
 
+默认 checkpoint：
+
+- 优先读取环境变量 `BEV_ESTI_CHECKPOINT`
+- 若 `db-cache` 中已经记录了构建它所用的 checkpoint，则默认直接复用该 checkpoint
+- 若既没有环境变量也没有缓存元信息，则自动选择 `../BEVPlace2/runs/` 下最近的 `bevplace` 训练 checkpoint
+
+默认输出目录：
+
+- 单样本 JSON：`debug_outputs/estimate_pose/<query_key>/result.json`
+- 单样本可视化：`debug_outputs/estimate_pose/<query_key>/viz/`
+- 批量评测：`debug_outputs/batch_evaluate/range_xxxx_yyyy/`
+
 数据库样本表中保存了：
 
 - 数据库 BEV 图像路径
@@ -171,15 +189,21 @@ source ./.venv/bin/activate
 
 ```bash
 cd /home/qimao/grad_ws/bev_esti
-/usr/bin/python3 build_db_cache.py \
-  --checkpoint /home/qimao/grad_ws/BEVPlace2/runs/Apr01_12-28-47/model_best.pth.tar \
-  --database-table /home/qimao/grad_ws/data/bevplace_tables/database_samples.csv \
-  --data-root /home/qimao/grad_ws/data \
-  --output-cache /home/qimao/grad_ws/bev_esti/database_cache.npz \
+python3 build_db_cache.py \
   --device cpu \
   --batch-size 8 \
   --num-workers 0
 ```
+
+说明：
+
+- 新版 `build_db_cache.py` 会把 `checkpoint_path` 一起写进 `database_cache.npz`
+- 如果你手头已有旧版 `database_cache.npz`，它不带这个元信息
+- 这种旧缓存现在不会再被脚本静默拿来和别的 checkpoint 混用，而是会提示你显式传 `--checkpoint` 或先重建缓存
+
+如果想手动指定模型，也可以额外传入：
+
+- `--checkpoint /path/to/model_best.pth.tar`
 
 输出：
 
@@ -199,31 +223,24 @@ cd /home/qimao/grad_ws/bev_esti
 
 ```bash
 cd /home/qimao/grad_ws/bev_esti
-/usr/bin/python3 estimate_pose.py \
-  --checkpoint /home/qimao/grad_ws/BEVPlace2/runs/Apr01_12-28-47/model_best.pth.tar \
-  --database-table /home/qimao/grad_ws/data/bevplace_tables/database_samples.csv \
-  --data-root /home/qimao/grad_ws/data \
-  --db-cache /home/qimao/grad_ws/bev_esti/database_cache.npz \
+python3 estimate_pose.py \
   --query-image /home/qimao/grad_ws/data/icp_segments_noground/bev_single/seg_0001.png \
   --topk 5 \
-  --device cpu \
-  --output-json /home/qimao/grad_ws/bev_esti/debug_outputs/query_0000_result.json
+  --device cpu
 ```
+
+默认会输出到：
+
+- `debug_outputs/estimate_pose/seg_0001/result.json`
 
 ### 7.2 使用查询样本表中的某个 query 做评测
 
 ```bash
 cd /home/qimao/grad_ws/bev_esti
-/usr/bin/python3 estimate_pose.py \
-  --checkpoint /home/qimao/grad_ws/BEVPlace2/runs/Apr01_12-28-47/model_best.pth.tar \
-  --database-table /home/qimao/grad_ws/data/bevplace_tables/database_samples.csv \
-  --query-table /home/qimao/grad_ws/data/bevplace_tables/query_samples.csv \
-  --data-root /home/qimao/grad_ws/data \
-  --db-cache /home/qimao/grad_ws/bev_esti/database_cache.npz \
-  --query-index 0 \
+python3 estimate_pose.py \
+  --query-index 10 \
   --topk 5 \
-  --device cpu \
-  --output-json /home/qimao/grad_ws/bev_esti/debug_outputs/query_0000_result.json
+  --device cpu
 ```
 
 这时脚本会同时输出：
@@ -231,6 +248,7 @@ cd /home/qimao/grad_ws/bev_esti
 - 估计位姿
 - 查询真实值
 - 估计误差
+- 对应 JSON 默认保存到 `debug_outputs/estimate_pose/query_0010/result.json`
 
 ### 7.3 导出 Top-K 变换关系与局部特征可视化
 
@@ -241,22 +259,21 @@ cd /home/qimao/grad_ws/bev_esti
 - 局部特征的伪彩色可视化
 - 局部匹配与 `RANSAC` 内点情况
 
-可以在单样本推理时附加 `--visualize-dir`：
+可以在单样本推理时附加 `--visualize`：
 
 ```bash
 cd /home/qimao/grad_ws/bev_esti
-/usr/bin/python3 estimate_pose.py \
-  --checkpoint /home/qimao/grad_ws/BEVPlace2/runs/Apr01_12-28-47/model_best.pth.tar \
-  --database-table /home/qimao/grad_ws/data/bevplace_tables/database_samples.csv \
-  --query-table /home/qimao/grad_ws/data/bevplace_tables/query_samples.csv \
-  --data-root /home/qimao/grad_ws/data \
-  --db-cache /home/qimao/grad_ws/bev_esti/database_cache.npz \
+python3 estimate_pose.py \
   --query-index 10 \
   --topk 3 \
   --device cpu \
-  --output-json /home/qimao/grad_ws/bev_esti/debug_outputs/query_0000_result_with_viz.json \
-  --visualize-dir /home/qimao/grad_ws/bev_esti/debug_outputs/query_0000_viz
+  --visualize
 ```
+
+默认会导出到：
+
+- `debug_outputs/estimate_pose/query_0010/result.json`
+- `debug_outputs/estimate_pose/query_0010/viz/topk_summary.png`
 
 默认会导出：
 
@@ -271,31 +288,44 @@ cd /home/qimao/grad_ws/bev_esti
 - query / candidate 的局部特征伪彩色图
 - 局部匹配连线图，其中绿色表示 `RANSAC` 内点
 
-如果需要减少匹配连线数量，可额外设置：
+如果需要减少匹配连线数量或强制指定目录，可额外设置：
 
 - `--visualize-match-limit`
+- `--visualize-dir`
 
 ### 7.4 批量评测前 20 个查询样本
 
 ```bash
 cd /home/qimao/grad_ws/bev_esti
-/usr/bin/python3 batch_evaluate.py \
-  --checkpoint /home/qimao/grad_ws/BEVPlace2/runs/Apr01_12-28-47/model_best.pth.tar \
-  --database-table /home/qimao/grad_ws/data/bevplace_tables/database_samples.csv \
-  --query-table /home/qimao/grad_ws/data/bevplace_tables/query_samples.csv \
-  --data-root /home/qimao/grad_ws/data \
-  --db-cache /home/qimao/grad_ws/bev_esti/database_cache.npz \
-  --topk 5 \
-  --device cpu \
+python3 batch_evaluate.py \
+  --start-index 0 \
   --limit 20 \
-  --output-csv /home/qimao/grad_ws/bev_esti/debug_outputs/batch_eval_top20.csv \
-  --output-json /home/qimao/grad_ws/bev_esti/debug_outputs/batch_eval_top20_summary.json
+  --topk 5 \
+  --device cpu
 ```
 
 输出：
 
-- `batch_eval_top20.csv`：逐样本 `coarse / refined` 对比结果
-- `batch_eval_top20_summary.json`：整体统计摘要
+- `debug_outputs/batch_evaluate/range_0000_0019/results.csv`：逐样本 `coarse / refined` 对比结果
+- `debug_outputs/batch_evaluate/range_0000_0019/summary.json`：整体统计摘要
+
+如果希望批量导出每个 query 的可视化结果，可以加：
+
+```bash
+cd /home/qimao/grad_ws/bev_esti
+python3 batch_evaluate.py \
+  --start-index 10 \
+  --limit 10 \
+  --topk 5 \
+  --device cpu \
+  --visualize
+```
+
+此时会额外导出：
+
+- `debug_outputs/batch_evaluate/range_0010_0019/visualizations/query_xxxx/topk_summary.png`
+- `debug_outputs/batch_evaluate/range_0010_0019/visualizations/query_xxxx/rank_XX_db_xxxx_panel.png`
+- `results.csv` 中也会记录每个 query 的可视化目录与总览图路径
 
 ---
 
