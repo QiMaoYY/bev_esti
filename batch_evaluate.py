@@ -306,6 +306,13 @@ def main():
 
         if visualize_root is not None:
             query_viz_dir = visualize_root / query_sample.sample_key
+            sample_gt = {
+                "sample_key": query_sample.sample_key,
+                "anchor_x": query_sample.anchor_x,
+                "anchor_y": query_sample.anchor_y,
+                "anchor_yaw_rad": query_sample.anchor_yaw_rad,
+                "anchor_yaw_deg": query_sample.anchor_yaw_deg,
+            }
             viz_outputs = export_pose_visualizations_with_estimator(
                 estimator=estimator,
                 query_image_path=str(query_sample.bev_path),
@@ -313,6 +320,7 @@ def main():
                 topk=args.topk,
                 resolution_override_m=args.resolution_m,
                 max_matches=args.visualize_match_limit,
+                query_gt=sample_gt,
             )
             row["visualization_dir"] = viz_outputs["output_dir"]
             row["visualization_summary_image"] = viz_outputs["summary_image"]

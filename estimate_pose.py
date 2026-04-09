@@ -212,6 +212,7 @@ def main():
             topk=args.topk,
             resolution_override_m=args.resolution_m,
             max_matches=args.visualize_match_limit,
+            query_gt=query_gt,
         )
         result["visualization"] = visualization_outputs
         print(f"[INFO] Visualization summary saved to: {visualization_outputs['summary_image']}")

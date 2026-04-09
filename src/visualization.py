@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -103,11 +104,17 @@ def _text_block(lines: Sequence[str], width: int, height: int) -> np.ndarray:
     canvas = np.zeros((height, width, 3), dtype=np.uint8)
     y = 28
     for line in lines:
-        cv2.putText(canvas, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
-        y += 28
+        cv2.putText(canvas, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        y += 26
         if y > height - 10:
             break
     return canvas
+
+
+def _yaw_error_deg(pred_rad: float, gt_rad: float) -> float:
+    delta = pred_rad - gt_rad
+    delta = math.atan2(math.sin(delta), math.cos(delta))
+    return abs(math.degrees(delta))
 
 
 def feature_pseudocolor(local_feat_hwc: np.ndarray) -> np.ndarray:
@@ -221,86 +228,127 @@ def draw_match_image(
     return _add_title(canvas, title)
 
 
-def build_candidate_panel(
+def _compute_pose_error_lines(
+    bevplace_3dof_pose: Dict[str, float],
+    query_gt: Optional[Dict[str, object]],
+) -> List[str]:
+    if query_gt is None:
+        return []
+    gt_x = float(query_gt["anchor_x"])
+    gt_y = float(query_gt["anchor_y"])
+    gt_yaw_rad = float(query_gt["anchor_yaw_rad"])
+    xy_err = math.hypot(bevplace_3dof_pose["x"] - gt_x, bevplace_3dof_pose["y"] - gt_y)
+    yaw_err = _yaw_error_deg(bevplace_3dof_pose["yaw_rad"], gt_yaw_rad)
+    return [
+        f"3DoF output error: xy={xy_err:.3f} m, yaw={yaw_err:.3f} deg",
+    ]
+
+
+def build_overlay_image(
     query_gray: np.ndarray,
     db_gray: np.ndarray,
-    query_local_feat: np.ndarray,
-    db_local_feat: np.ndarray,
-    match_debug: Dict[str, object],
-    pose_result: Optional[Dict[str, object]],
+    affine: Optional[np.ndarray],
     metadata: Dict[str, object],
-    tile_size: Tuple[int, int] = (280, 280),
-    max_matches: int = 80,
+    bevplace_3dof_pose: Dict[str, float],
+    query_gt: Optional[Dict[str, object]],
+    tile_size: Tuple[int, int] = (320, 320),
 ) -> np.ndarray:
-    query_keypoints_img = draw_points(query_gray, np.asarray(match_debug["query_keypoints_px"]), (0, 255, 0))
-    db_keypoints_img = draw_points(db_gray, np.asarray(match_debug["db_keypoints_px"]), (0, 255, 0))
-    query_feat_img = feature_pseudocolor(query_local_feat)
-    db_feat_img = feature_pseudocolor(db_local_feat)
-
-    affine = None
-    if pose_result is not None:
-        affine = estimate_query_to_db_affine(
-            np.asarray(match_debug["matched_query_points_px"]),
-            np.asarray(match_debug["matched_db_points_px"]),
-            np.asarray(pose_result.get("inlier_mask", []), dtype=bool),
-        )
-
-    row1 = _stack_row(
+    row = _stack_row(
         [
-            _add_title(_resize_with_padding(query_gray, tile_size), "Input Query BEV"),
-            _add_title(_resize_with_padding(db_gray, tile_size), f"Top-{metadata['rank']} Candidate DB"),
             _add_title(_resize_with_padding(create_overlay(query_gray, db_gray), tile_size), "Overlay Before"),
-            _add_title(_resize_with_padding(create_overlay(query_gray, db_gray, affine_query_to_db=affine), tile_size), "Overlay After"),
+            _add_title(
+                _resize_with_padding(create_overlay(query_gray, db_gray, affine_query_to_db=affine), tile_size),
+                "Overlay After",
+            ),
         ]
     )
 
-    row2 = _stack_row(
+    lines = [
+        f"Rank {metadata['rank']} | {metadata['db_sample_key']} | source={metadata['pose_source']}",
+        (
+            f"3DoF output: x={bevplace_3dof_pose['x']:.3f}, y={bevplace_3dof_pose['y']:.3f}, "
+            f"yaw={bevplace_3dof_pose['yaw_deg']:.2f} deg"
+        ),
+    ]
+    lines.extend(_compute_pose_error_lines(bevplace_3dof_pose, query_gt))
+    header = _text_block(lines, width=row.shape[1], height=90)
+    return _stack_col([header, row], gap=4)
+
+
+def build_keypoints_image(
+    query_gray: np.ndarray,
+    db_gray: np.ndarray,
+    match_debug: Dict[str, object],
+    pose_result: Optional[Dict[str, object]],
+    metadata: Dict[str, object],
+    tile_size: Tuple[int, int] = (320, 320),
+) -> np.ndarray:
+    query_kp_img = draw_points(query_gray, np.asarray(match_debug["query_keypoints_px"]), (0, 255, 0))
+    db_kp_img = draw_points(db_gray, np.asarray(match_debug["db_keypoints_px"]), (0, 255, 0))
+    row = _stack_row(
         [
-            _add_title(_resize_with_padding(query_keypoints_img, tile_size), "Query FAST Keypoints"),
-            _add_title(_resize_with_padding(db_keypoints_img, tile_size), "DB FAST Keypoints"),
+            _add_title(_resize_with_padding(query_kp_img, tile_size), "Query FAST Keypoints"),
+            _add_title(_resize_with_padding(db_kp_img, tile_size), "DB FAST Keypoints"),
+        ]
+    )
+
+    inlier_count = 0 if pose_result is None else int(pose_result["inlier_count"])
+    match_count = int(match_debug["match_count"])
+    inlier_ratio = 0.0 if match_count == 0 else inlier_count / match_count
+    lines = [
+        f"Rank {metadata['rank']} | {metadata['db_sample_key']}",
+        f"query kps={match_debug['query_keypoint_count']}, db kps={match_debug['db_keypoint_count']}",
+        f"matches={match_count}, inliers={inlier_count}, ratio={inlier_ratio:.3f}",
+    ]
+    header = _text_block(lines, width=row.shape[1], height=80)
+    return _stack_col([header, row], gap=4)
+
+
+def build_features_image(
+    query_local_feat: np.ndarray,
+    db_local_feat: np.ndarray,
+    metadata: Dict[str, object],
+    tile_size: Tuple[int, int] = (320, 320),
+) -> np.ndarray:
+    query_feat_img = feature_pseudocolor(query_local_feat)
+    db_feat_img = feature_pseudocolor(db_local_feat)
+    row = _stack_row(
+        [
             _add_title(_resize_with_padding(query_feat_img, tile_size), "Query Local Feature RGB"),
             _add_title(_resize_with_padding(db_feat_img, tile_size), "DB Local Feature RGB"),
         ]
     )
+    lines = [f"Rank {metadata['rank']} | {metadata['db_sample_key']} | sq_l2={metadata['feature_sq_l2']:.4f}"]
+    header = _text_block(lines, width=row.shape[1], height=30)
+    return _stack_col([header, row], gap=4)
 
+
+def build_matches_image(
+    query_gray: np.ndarray,
+    db_gray: np.ndarray,
+    match_debug: Dict[str, object],
+    pose_result: Optional[Dict[str, object]],
+    bevplace_3dof_pose: Dict[str, float],
+    query_gt: Optional[Dict[str, object]],
+    metadata: Dict[str, object],
+    max_matches: int = 80,
+) -> np.ndarray:
+    inlier_mask = None if pose_result is None else np.asarray(pose_result.get("inlier_mask", []), dtype=bool)
     match_img = draw_match_image(
         query_gray=query_gray,
         db_gray=db_gray,
         matched_query_points_px=np.asarray(match_debug["matched_query_points_px"]),
         matched_db_points_px=np.asarray(match_debug["matched_db_points_px"]),
-        inlier_mask=None if pose_result is None else np.asarray(pose_result.get("inlier_mask", []), dtype=bool),
+        inlier_mask=inlier_mask,
         max_matches=max_matches,
     )
-    row_width = row1.shape[1]
-    row3 = _fit_width(match_img, width=row_width, max_height=420)
 
     lines = [
-        (
-            f"Rank {metadata['rank']} | {metadata['db_sample_key']} | "
-            f"source={metadata['pose_source']} | sq_l2={metadata['feature_sq_l2']:.4f}"
-        ),
-        (
-            "retrieval anchor: "
-            f"x={metadata['retrieval_anchor_pose']['x']:.3f}, "
-            f"y={metadata['retrieval_anchor_pose']['y']:.3f}, "
-            f"yaw={metadata['retrieval_anchor_pose']['yaw_deg']:.2f} deg"
-        ),
+        f"Rank {metadata['rank']} | {metadata['db_sample_key']} | source={metadata['pose_source']}",
     ]
-    if pose_result is not None:
-        lines.append(
-            "BEVPlace++ 3DoF delta: "
-            f"dx={pose_result['relative_tx_m']:.3f} m, dy={pose_result['relative_ty_m']:.3f} m, "
-            f"dyaw={pose_result['relative_yaw_deg']:.2f} deg"
-        )
-        lines.append(
-            f"matches={pose_result['match_count']}, inliers={pose_result['inlier_count']}, "
-            f"ratio={pose_result['inlier_ratio']:.3f}"
-        )
-    else:
-        lines.append("BEVPlace++ 3DoF: unavailable, fallback uses retrieval anchor pose")
-
-    header = _text_block(lines, width=row_width, height=120)
-    return _stack_col([header, row1, row2, row3], gap=12)
+    lines.extend(_compute_pose_error_lines(bevplace_3dof_pose, query_gt))
+    header = _text_block(lines, width=match_img.shape[1], height=60)
+    return _stack_col([header, match_img], gap=4)
 
 
 def build_summary_canvas(
@@ -308,31 +356,39 @@ def build_summary_canvas(
     query_local_feat: np.ndarray,
     query_keypoints_px: np.ndarray,
     candidate_cards: Sequence[Dict[str, object]],
+    query_gt: Optional[Dict[str, object]] = None,
     tile_size: Tuple[int, int] = (220, 220),
 ) -> np.ndarray:
     query_row = _stack_row(
         [
             _add_title(_resize_with_padding(query_gray, tile_size), "Input Query BEV"),
-            _add_title(_resize_with_padding(draw_points(query_gray, query_keypoints_px, (0, 255, 0)), tile_size), "Query FAST Keypoints"),
-            _add_title(_resize_with_padding(feature_pseudocolor(query_local_feat), tile_size), "Query Local Feature RGB"),
+            _add_title(
+                _resize_with_padding(draw_points(query_gray, query_keypoints_px, (0, 255, 0)), tile_size),
+                "Query FAST Keypoints",
+            ),
+            _add_title(_resize_with_padding(feature_pseudocolor(query_local_feat), tile_size), "Query Local Feature"),
         ]
     )
 
     rows = [query_row]
     for card in candidate_cards:
+        bevplace_3dof_pose = card["bevplace_3dof_pose"]
         text_lines = [
             f"rank={card['rank']} | {card['db_sample_key']}",
             f"source={card['pose_source']} | l2={card['feature_sq_l2']:.4f}",
             f"inliers={card['inlier_count']} | ratio={card['inlier_ratio']:.3f}",
-            f"dyaw={card['relative_yaw_deg']:.2f} deg",
-            f"dx={card['relative_tx_m']:.3f} m | dy={card['relative_ty_m']:.3f} m",
+            (
+                f"3DoF: x={bevplace_3dof_pose['x']:.3f}, y={bevplace_3dof_pose['y']:.3f}, "
+                f"yaw={bevplace_3dof_pose['yaw_deg']:.2f}"
+            ),
         ]
+        text_lines.extend(_compute_pose_error_lines(bevplace_3dof_pose, query_gt))
         rows.append(
             _stack_row(
                 [
                     _add_title(_resize_with_padding(card["db_gray"], tile_size), f"Top-{card['rank']} Candidate"),
                     _add_title(_resize_with_padding(card["overlay_after"], tile_size), "Overlay After"),
-                    _text_block(text_lines, width=340, height=tile_size[1]),
+                    _text_block(text_lines, width=380, height=tile_size[1]),
                 ]
             )
         )
@@ -349,6 +405,7 @@ def export_pose_visualizations_with_estimator(
     topk: int = 5,
     resolution_override_m: Optional[float] = None,
     max_matches: int = 80,
+    query_gt: Optional[Dict[str, object]] = None,
 ) -> Dict[str, str]:
     output_path = Path(output_dir).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
@@ -398,12 +455,9 @@ def export_pose_visualizations_with_estimator(
             }
 
             pose_source = "retrieval_anchor_only"
-            bevplace_3dof_pose = retrieval_anchor_pose
+            bevplace_3dof_pose = dict(retrieval_anchor_pose)
             inlier_count = 0
             inlier_ratio = 0.0
-            relative_yaw_deg = 0.0
-            relative_tx_m = 0.0
-            relative_ty_m = 0.0
             inlier_mask = None
 
             if pose_result is not None:
@@ -413,9 +467,6 @@ def export_pose_visualizations_with_estimator(
                 pose_source = "bevplace_3dof"
                 inlier_count = int(pose_result["inlier_count"])
                 inlier_ratio = float(pose_result["inlier_ratio"])
-                relative_yaw_deg = float(pose_result["relative_yaw_deg"])
-                relative_tx_m = float(pose_result["relative_tx_m"])
-                relative_ty_m = float(pose_result["relative_ty_m"])
                 inlier_mask = np.asarray(pose_result.get("inlier_mask", []), dtype=bool)
 
             affine = estimate_query_to_db_affine(
@@ -434,19 +485,30 @@ def export_pose_visualizations_with_estimator(
                 "bevplace_3dof_pose": bevplace_3dof_pose,
             }
 
-            panel = build_candidate_panel(
-                query_gray=query_gray,
-                db_gray=db_gray,
-                query_local_feat=query_local_feat,
-                db_local_feat=db_local_feat,
-                match_debug=match_debug,
-                pose_result=pose_result,
-                metadata=metadata,
-                max_matches=max_matches,
+            prefix = f"rank_{rank:02d}_{db_sample.sample_key}"
+            cv2.imwrite(
+                str(output_path / f"{prefix}_overlay.png"),
+                build_overlay_image(
+                    query_gray, db_gray, affine, metadata, bevplace_3dof_pose, query_gt,
+                ),
             )
-
-            panel_name = f"rank_{rank:02d}_{db_sample.sample_key}_panel.png"
-            cv2.imwrite(str(output_path / panel_name), panel)
+            cv2.imwrite(
+                str(output_path / f"{prefix}_keypoints.png"),
+                build_keypoints_image(
+                    query_gray, db_gray, match_debug, pose_result, metadata,
+                ),
+            )
+            cv2.imwrite(
+                str(output_path / f"{prefix}_features.png"),
+                build_features_image(query_local_feat, db_local_feat, metadata),
+            )
+            cv2.imwrite(
+                str(output_path / f"{prefix}_matches.png"),
+                build_matches_image(
+                    query_gray, db_gray, match_debug, pose_result,
+                    bevplace_3dof_pose, query_gt, metadata, max_matches,
+                ),
+            )
 
             candidate_cards.append(
                 {
@@ -456,12 +518,9 @@ def export_pose_visualizations_with_estimator(
                     "pose_source": pose_source,
                     "inlier_count": inlier_count,
                     "inlier_ratio": inlier_ratio,
-                    "relative_yaw_deg": relative_yaw_deg,
-                    "relative_tx_m": relative_tx_m,
-                    "relative_ty_m": relative_ty_m,
+                    "bevplace_3dof_pose": bevplace_3dof_pose,
                     "db_gray": db_gray,
                     "overlay_after": overlay_after,
-                    "panel_path": panel_name,
                 }
             )
 
@@ -473,6 +532,7 @@ def export_pose_visualizations_with_estimator(
         query_local_feat=query_local_feat,
         query_keypoints_px=query_keypoints_px,
         candidate_cards=candidate_cards,
+        query_gt=query_gt,
     )
     summary_name = "topk_summary.png"
     cv2.imwrite(str(output_path / summary_name), summary)
@@ -496,6 +556,7 @@ def export_pose_visualizations(
     num_workers: int = 0,
     resolution_override_m: Optional[float] = None,
     max_matches: int = 80,
+    query_gt: Optional[Dict[str, object]] = None,
 ) -> Dict[str, str]:
     estimator = PoseEstimator(
         checkpoint_path=checkpoint_path,
@@ -513,4 +574,5 @@ def export_pose_visualizations(
         topk=topk,
         resolution_override_m=resolution_override_m,
         max_matches=max_matches,
+        query_gt=query_gt,
     )
