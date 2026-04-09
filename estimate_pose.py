@@ -25,7 +25,7 @@ from src.visualization import export_pose_visualizations_with_estimator
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Estimate 3DoF pose for a single BEV image on CPU.")
+    parser = argparse.ArgumentParser(description="Estimate retrieval-anchor and BEVPlace++ 3DoF pose for a single BEV image.")
     parser.add_argument(
         "--checkpoint",
         default="",
@@ -63,7 +63,7 @@ def parse_args():
         help="Query sample_index in query_samples.csv. Ignored when --query-image or --query-key is provided.",
     )
     parser.add_argument("--query-key", default="", help="Query sample_key in query_samples.csv.")
-    parser.add_argument("--topk", type=int, default=5, help="Number of coarse retrieval candidates.")
+    parser.add_argument("--topk", type=int, default=5, help="Number of retrieval-anchor candidates.")
     parser.add_argument(
         "--device",
         default="cpu",
@@ -193,15 +193,15 @@ def main():
     )
 
     if query_gt is not None:
-        est = result["best"]["estimated_pose"]
+        est = result["output_pose"]
         xy_err = math.hypot(est["x"] - query_gt["anchor_x"], est["y"] - query_gt["anchor_y"])
         yaw_err = _yaw_error_deg(est["yaw_rad"], query_gt["anchor_yaw_rad"])
         result["query_ground_truth"] = query_gt
-        result["best"]["estimation_error"] = {
+        result["output_pose_error"] = {
             "xy_error_m": xy_err,
             "yaw_error_deg": yaw_err,
         }
-        print("[INFO] Best estimation error: " f"xy={xy_err:.3f} m, yaw={yaw_err:.3f} deg")
+        print("[INFO] Output pose error: " f"xy={xy_err:.3f} m, yaw={yaw_err:.3f} deg")
 
     if visualize_dir is not None:
         print(f"[INFO] Exporting visualizations to: {visualize_dir}")

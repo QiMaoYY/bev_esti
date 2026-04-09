@@ -275,12 +275,20 @@ def build_candidate_panel(
     row3 = _fit_width(match_img, width=row_width, max_height=420)
 
     lines = [
-        f"Rank {metadata['rank']} | {metadata['db_sample_key']} | mode={metadata['mode']} | sq_l2={metadata['feature_sq_l2']:.4f}",
-        f"coarse: x={metadata['coarse_pose']['x']:.3f}, y={metadata['coarse_pose']['y']:.3f}, yaw={metadata['coarse_pose']['yaw_deg']:.2f} deg",
+        (
+            f"Rank {metadata['rank']} | {metadata['db_sample_key']} | "
+            f"source={metadata['pose_source']} | sq_l2={metadata['feature_sq_l2']:.4f}"
+        ),
+        (
+            "retrieval anchor: "
+            f"x={metadata['retrieval_anchor_pose']['x']:.3f}, "
+            f"y={metadata['retrieval_anchor_pose']['y']:.3f}, "
+            f"yaw={metadata['retrieval_anchor_pose']['yaw_deg']:.2f} deg"
+        ),
     ]
     if pose_result is not None:
         lines.append(
-            "refined: "
+            "BEVPlace++ 3DoF delta: "
             f"dx={pose_result['relative_tx_m']:.3f} m, dy={pose_result['relative_ty_m']:.3f} m, "
             f"dyaw={pose_result['relative_yaw_deg']:.2f} deg"
         )
@@ -289,7 +297,7 @@ def build_candidate_panel(
             f"ratio={pose_result['inlier_ratio']:.3f}"
         )
     else:
-        lines.append("refined: failed to recover relative pose")
+        lines.append("BEVPlace++ 3DoF: unavailable, fallback uses retrieval anchor pose")
 
     header = _text_block(lines, width=row_width, height=120)
     return _stack_col([header, row1, row2, row3], gap=12)
@@ -314,7 +322,7 @@ def build_summary_canvas(
     for card in candidate_cards:
         text_lines = [
             f"rank={card['rank']} | {card['db_sample_key']}",
-            f"mode={card['mode']} | l2={card['feature_sq_l2']:.4f}",
+            f"source={card['pose_source']} | l2={card['feature_sq_l2']:.4f}",
             f"inliers={card['inlier_count']} | ratio={card['inlier_ratio']:.3f}",
             f"dyaw={card['relative_yaw_deg']:.2f} deg",
             f"dx={card['relative_tx_m']:.3f} m | dy={card['relative_ty_m']:.3f} m",
@@ -382,15 +390,15 @@ def export_pose_visualizations_with_estimator(
                 resolution_m=resolution_m,
             )
 
-            coarse_pose = {
+            retrieval_anchor_pose = {
                 "x": db_sample.anchor_x,
                 "y": db_sample.anchor_y,
                 "yaw_rad": db_sample.anchor_yaw_rad,
                 "yaw_deg": db_sample.anchor_yaw_deg,
             }
 
-            mode = "coarse_only"
-            estimated_pose = coarse_pose
+            pose_source = "retrieval_anchor_only"
+            bevplace_3dof_pose = retrieval_anchor_pose
             inlier_count = 0
             inlier_ratio = 0.0
             relative_yaw_deg = 0.0
@@ -401,8 +409,8 @@ def export_pose_visualizations_with_estimator(
             if pose_result is not None:
                 db_pose = pose_to_matrix_2d(db_sample.anchor_x, db_sample.anchor_y, db_sample.anchor_yaw_rad)
                 relative_h = np.asarray(pose_result["relative_matrix_3x3"], dtype=np.float64)
-                estimated_pose = matrix_to_pose_2d(db_pose @ relative_h)
-                mode = "refined"
+                bevplace_3dof_pose = matrix_to_pose_2d(db_pose @ relative_h)
+                pose_source = "bevplace_3dof"
                 inlier_count = int(pose_result["inlier_count"])
                 inlier_ratio = float(pose_result["inlier_ratio"])
                 relative_yaw_deg = float(pose_result["relative_yaw_deg"])
@@ -421,9 +429,9 @@ def export_pose_visualizations_with_estimator(
                 "rank": rank,
                 "db_sample_key": db_sample.sample_key,
                 "feature_sq_l2": float(feature_sq_l2),
-                "coarse_pose": coarse_pose,
-                "mode": mode,
-                "estimated_pose": estimated_pose,
+                "retrieval_anchor_pose": retrieval_anchor_pose,
+                "pose_source": pose_source,
+                "bevplace_3dof_pose": bevplace_3dof_pose,
             }
 
             panel = build_candidate_panel(
@@ -445,7 +453,7 @@ def export_pose_visualizations_with_estimator(
                     "rank": rank,
                     "db_sample_key": db_sample.sample_key,
                     "feature_sq_l2": float(feature_sq_l2),
-                    "mode": mode,
+                    "pose_source": pose_source,
                     "inlier_count": inlier_count,
                     "inlier_ratio": inlier_ratio,
                     "relative_yaw_deg": relative_yaw_deg,

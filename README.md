@@ -58,7 +58,7 @@ bev_esti/
 - `project_paths.py`：默认路径、自动 checkpoint 检测、自动输出目录命名
 - `build_db_cache.py`：离线缓存数据库全局描述子
 - `estimate_pose.py`：对单个 query BEV 估计位姿
-- `batch_evaluate.py`：批量评测 `coarse / refined` 并可选导出可视化
+- `batch_evaluate.py`：批量评测“检索锚点位姿 / BEVPlace++ 3DoF 粗定位结果”并可选导出可视化
 
 ---
 
@@ -306,7 +306,7 @@ python3 batch_evaluate.py \
 
 输出：
 
-- `debug_outputs/batch_evaluate/range_0000_0019/results.csv`：逐样本 `coarse / refined` 对比结果
+- `debug_outputs/batch_evaluate/range_0000_0019/results.csv`：逐样本“检索锚点位姿 / BEVPlace++ 3DoF 粗定位结果”对比结果
 - `debug_outputs/batch_evaluate/range_0000_0019/summary.json`：整体统计摘要
 
 如果希望批量导出每个 query 的可视化结果，可以加：

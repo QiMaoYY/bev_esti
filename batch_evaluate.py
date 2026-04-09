@@ -28,7 +28,9 @@ from src.visualization import export_pose_visualizations_with_estimator
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Batch evaluate coarse and refined 3DoF estimation on local BEV queries.")
+    parser = argparse.ArgumentParser(
+        description="Batch evaluate retrieval-anchor and BEVPlace++ 3DoF localization on local BEV queries."
+    )
     parser.add_argument(
         "--checkpoint",
         default="",
@@ -54,7 +56,7 @@ def parse_args():
         default=default_db_cache(),
         help="Database descriptor cache path.",
     )
-    parser.add_argument("--topk", type=int, default=5, help="Number of coarse retrieval candidates.")
+    parser.add_argument("--topk", type=int, default=5, help="Number of retrieval-anchor candidates.")
     parser.add_argument(
         "--device",
         default="cpu",
@@ -236,11 +238,11 @@ def main():
     )
 
     rows: List[Dict[str, object]] = []
-    coarse_xy_errors: List[float] = []
-    coarse_yaw_errors: List[float] = []
-    refined_xy_errors: List[float] = []
-    refined_yaw_errors: List[float] = []
-    refined_available = 0
+    retrieval_anchor_xy_errors: List[float] = []
+    retrieval_anchor_yaw_errors: List[float] = []
+    bevplace_3dof_xy_errors: List[float] = []
+    bevplace_3dof_yaw_errors: List[float] = []
+    bevplace_3dof_available = 0
 
     iterator = tqdm(query_samples, desc="Batch evaluating queries")
     for query_sample in iterator:
@@ -252,21 +254,27 @@ def main():
         )
 
         best = result["best"]
-        coarse = result["candidates"][0]["coarse_pose"]
-        refined = best["estimated_pose"]
+        retrieval_anchor = result["candidates"][0]["retrieval_anchor_pose"]
+        bevplace_3dof = best["bevplace_3dof_pose"]
 
-        coarse_xy = math.hypot(coarse["x"] - query_sample.anchor_x, coarse["y"] - query_sample.anchor_y)
-        coarse_yaw = yaw_error_deg(coarse["yaw_rad"], query_sample.anchor_yaw_rad)
-        refined_xy = math.hypot(refined["x"] - query_sample.anchor_x, refined["y"] - query_sample.anchor_y)
-        refined_yaw = yaw_error_deg(refined["yaw_rad"], query_sample.anchor_yaw_rad)
+        retrieval_anchor_xy = math.hypot(
+            retrieval_anchor["x"] - query_sample.anchor_x,
+            retrieval_anchor["y"] - query_sample.anchor_y,
+        )
+        retrieval_anchor_yaw = yaw_error_deg(retrieval_anchor["yaw_rad"], query_sample.anchor_yaw_rad)
+        bevplace_3dof_xy = math.hypot(
+            bevplace_3dof["x"] - query_sample.anchor_x,
+            bevplace_3dof["y"] - query_sample.anchor_y,
+        )
+        bevplace_3dof_yaw = yaw_error_deg(bevplace_3dof["yaw_rad"], query_sample.anchor_yaw_rad)
 
-        coarse_xy_errors.append(coarse_xy)
-        coarse_yaw_errors.append(coarse_yaw)
-        refined_xy_errors.append(refined_xy)
-        refined_yaw_errors.append(refined_yaw)
+        retrieval_anchor_xy_errors.append(retrieval_anchor_xy)
+        retrieval_anchor_yaw_errors.append(retrieval_anchor_yaw)
+        bevplace_3dof_xy_errors.append(bevplace_3dof_xy)
+        bevplace_3dof_yaw_errors.append(bevplace_3dof_yaw)
 
-        if best.get("mode") == "refined":
-            refined_available += 1
+        if best.get("pose_source") == "bevplace_3dof":
+            bevplace_3dof_available += 1
 
         row = {
             "query_index": query_sample.sample_index,
@@ -275,20 +283,20 @@ def main():
             "gt_x": query_sample.anchor_x,
             "gt_y": query_sample.anchor_y,
             "gt_yaw_deg": query_sample.anchor_yaw_deg,
-            "coarse_db_key": result["candidates"][0]["db_sample_key"],
-            "coarse_x": coarse["x"],
-            "coarse_y": coarse["y"],
-            "coarse_yaw_deg": coarse["yaw_deg"],
-            "coarse_xy_error_m": coarse_xy,
-            "coarse_yaw_error_deg": coarse_yaw,
-            "best_rank": best["rank"],
-            "best_mode": best.get("mode", "coarse_only"),
-            "best_db_key": best["db_sample_key"],
-            "best_x": refined["x"],
-            "best_y": refined["y"],
-            "best_yaw_deg": refined["yaw_deg"],
-            "best_xy_error_m": refined_xy,
-            "best_yaw_error_deg": refined_yaw,
+            "retrieval_anchor_db_key": result["candidates"][0]["db_sample_key"],
+            "retrieval_anchor_x": retrieval_anchor["x"],
+            "retrieval_anchor_y": retrieval_anchor["y"],
+            "retrieval_anchor_yaw_deg": retrieval_anchor["yaw_deg"],
+            "retrieval_anchor_xy_error_m": retrieval_anchor_xy,
+            "retrieval_anchor_yaw_error_deg": retrieval_anchor_yaw,
+            "selected_candidate_rank": best["rank"],
+            "output_pose_source": best.get("pose_source", "retrieval_anchor_only"),
+            "selected_db_key": best["db_sample_key"],
+            "bevplace_3dof_x": bevplace_3dof["x"],
+            "bevplace_3dof_y": bevplace_3dof["y"],
+            "bevplace_3dof_yaw_deg": bevplace_3dof["yaw_deg"],
+            "bevplace_3dof_xy_error_m": bevplace_3dof_xy,
+            "bevplace_3dof_yaw_error_deg": bevplace_3dof_yaw,
             "feature_sq_l2": best["feature_sq_l2"],
             "inlier_count": best.get("relative_pose", {}).get("inlier_count", ""),
             "inlier_ratio": best.get("relative_pose", {}).get("inlier_ratio", ""),
@@ -323,22 +331,22 @@ def main():
         "limit": args.limit,
         "query_count": len(query_samples),
         "query_index_range": [query_samples[0].sample_index, query_samples[-1].sample_index],
-        "refined_available_count": refined_available,
+        "bevplace_3dof_available_count": bevplace_3dof_available,
         "output_dir": str(output_dir),
         "output_csv": str(output_csv),
         "output_json": str(output_json),
         "visualize_root": "" if visualize_root is None else str(visualize_root),
-        "coarse": {
-            "xy": summarize(coarse_xy_errors),
-            "yaw_deg": summarize(coarse_yaw_errors),
-            "xy_lt_2m_rate": rate(coarse_xy_errors, 2.0),
-            "yaw_lt_5deg_rate": rate(coarse_yaw_errors, 5.0),
+        "retrieval_anchor": {
+            "xy": summarize(retrieval_anchor_xy_errors),
+            "yaw_deg": summarize(retrieval_anchor_yaw_errors),
+            "xy_lt_2m_rate": rate(retrieval_anchor_xy_errors, 2.0),
+            "yaw_lt_5deg_rate": rate(retrieval_anchor_yaw_errors, 5.0),
         },
-        "refined": {
-            "xy": summarize(refined_xy_errors),
-            "yaw_deg": summarize(refined_yaw_errors),
-            "xy_lt_2m_rate": rate(refined_xy_errors, 2.0),
-            "yaw_lt_5deg_rate": rate(refined_yaw_errors, 5.0),
+        "bevplace_3dof": {
+            "xy": summarize(bevplace_3dof_xy_errors),
+            "yaw_deg": summarize(bevplace_3dof_yaw_errors),
+            "xy_lt_2m_rate": rate(bevplace_3dof_xy_errors, 2.0),
+            "yaw_lt_5deg_rate": rate(bevplace_3dof_yaw_errors, 5.0),
         },
     }
 
@@ -349,14 +357,14 @@ def main():
     print(f"[INFO] Per-query CSV saved to: {output_csv}")
     print(f"[INFO] Summary JSON saved to: {output_json}")
     print(
-        "[INFO] Coarse summary: "
-        f"xy_mean={summary['coarse']['xy']['mean']:.3f} m, "
-        f"yaw_mean={summary['coarse']['yaw_deg']['mean']:.3f} deg"
+        "[INFO] Retrieval-anchor summary: "
+        f"xy_mean={summary['retrieval_anchor']['xy']['mean']:.3f} m, "
+        f"yaw_mean={summary['retrieval_anchor']['yaw_deg']['mean']:.3f} deg"
     )
     print(
-        "[INFO] Refined summary: "
-        f"xy_mean={summary['refined']['xy']['mean']:.3f} m, "
-        f"yaw_mean={summary['refined']['yaw_deg']['mean']:.3f} deg"
+        "[INFO] BEVPlace++ 3DoF summary: "
+        f"xy_mean={summary['bevplace_3dof']['xy']['mean']:.3f} m, "
+        f"yaw_mean={summary['bevplace_3dof']['yaw_deg']['mean']:.3f} deg"
     )
 
 

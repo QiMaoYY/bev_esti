@@ -384,11 +384,11 @@ class PoseEstimator:
 
         top_indices, top_sq_dists = l2_topk(query_global_desc, self.database_descs, topk=topk)
         if show_progress:
-            print(f"[INFO] Retrieved Top-{topk} coarse candidates.")
+            print(f"[INFO] Retrieved Top-{topk} retrieval-anchor candidates.")
 
         candidates: List[Dict[str, object]] = []
-        best_refined: Optional[Dict[str, object]] = None
-        best_refined_score: Optional[Tuple[int, float]] = None
+        best_bevplace_3dof: Optional[Dict[str, object]] = None
+        best_bevplace_3dof_score: Optional[Tuple[int, float]] = None
 
         retrieved_candidates: List[Tuple[int, int, float, Sample, np.ndarray]] = []
         for rank, (db_index, feature_sq_l2) in enumerate(zip(top_indices.tolist(), top_sq_dists.tolist()), start=1):
@@ -424,7 +424,7 @@ class PoseEstimator:
                         resolution_m=resolution_m,
                     )
 
-                    coarse_pose = {
+                    retrieval_anchor_pose = {
                         "x": db_sample.anchor_x,
                         "y": db_sample.anchor_y,
                         "yaw_rad": db_sample.anchor_yaw_rad,
@@ -437,22 +437,22 @@ class PoseEstimator:
                         "db_sample_key": db_sample.sample_key,
                         "db_bev_path": str(db_sample.bev_path),
                         "feature_sq_l2": float(feature_sq_l2),
-                        "coarse_pose": coarse_pose,
-                        "mode": "coarse_only",
+                        "retrieval_anchor_pose": retrieval_anchor_pose,
+                        "pose_source": "retrieval_anchor_only",
                     }
 
                     if pose_result is not None:
                         db_pose = pose_to_matrix_2d(db_sample.anchor_x, db_sample.anchor_y, db_sample.anchor_yaw_rad)
                         relative_h = np.asarray(pose_result["relative_matrix_3x3"], dtype=np.float64)
-                        estimated_pose = matrix_to_pose_2d(db_pose @ relative_h)
-                        candidate["mode"] = "refined"
+                        bevplace_3dof_pose = matrix_to_pose_2d(db_pose @ relative_h)
+                        candidate["pose_source"] = "bevplace_3dof"
                         candidate["relative_pose"] = pose_result
-                        candidate["estimated_pose"] = estimated_pose
+                        candidate["bevplace_3dof_pose"] = bevplace_3dof_pose
 
                         score = (int(pose_result["inlier_count"]), -float(feature_sq_l2))
-                        if best_refined is None or score > best_refined_score:
-                            best_refined = candidate
-                            best_refined_score = score
+                        if best_bevplace_3dof is None or score > best_bevplace_3dof_score:
+                            best_bevplace_3dof = candidate
+                            best_bevplace_3dof_score = score
 
                     candidates.append(candidate)
                     if progress is not None:
@@ -461,22 +461,26 @@ class PoseEstimator:
             if progress is not None:
                 progress.close()
 
-        if best_refined is not None:
-            best = best_refined
+        if best_bevplace_3dof is not None:
+            best = best_bevplace_3dof
+            output_pose = best["bevplace_3dof_pose"]
         else:
             best = dict(candidates[0])
-            best["estimated_pose"] = best["coarse_pose"]
+            best["bevplace_3dof_pose"] = best["retrieval_anchor_pose"]
+            output_pose = best["retrieval_anchor_pose"]
 
         if show_progress:
-            mode = best.get("mode", "unknown")
+            pose_source = best.get("pose_source", "unknown")
             db_key = best.get("db_sample_key", "unknown")
-            print(f"[INFO] Best candidate: {db_key} ({mode})")
+            print(f"[INFO] Best output-pose candidate: {db_key} ({pose_source})")
 
         result = {
             "query_image": str(query_image_path),
             "device": str(self.device),
             "topk": topk,
             "query_feature_seconds": query_feature_seconds,
+            "output_pose": output_pose,
+            "output_pose_source": best.get("pose_source", "unknown"),
             "best": best,
             "candidates": candidates,
         }
